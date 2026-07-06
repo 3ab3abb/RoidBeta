@@ -1,0 +1,6 @@
+# Roidbeta v1 runtime dependencies.
+# Pin to versions known to work together on Apple Silicon (M1).
+# mediapipe currently supports CPython 3.9 to 3.12, so run this project on one of those.
+opencv-python>=4.9,<5
+mediapipe>=0.10.9,<0.11
+numpy>=1.24,<2

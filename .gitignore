@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Downloaded off-the-shelf model assets (fetched on first run, not source).
+models/
