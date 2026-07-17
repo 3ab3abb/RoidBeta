@@ -48,6 +48,20 @@ class FrameSource(ABC):
     def stop(self) -> None:
         """Stop producing frames and release the underlying device."""
 
+    # Playback control. Meaningful only for finite sources (a video file); live
+    # sources cannot be paused and treat these as no-ops.
+
+    def pause(self) -> None:
+        """Hold the current frame instead of advancing. No-op for live sources."""
+
+    def resume(self) -> None:
+        """Resume advancing frames. No-op for live sources."""
+
+    @property
+    def is_finished(self) -> bool:
+        """True when a finite source has reached its end. Always False if live."""
+        return False
+
     def __enter__(self) -> "FrameSource":
         self.start()
         return self

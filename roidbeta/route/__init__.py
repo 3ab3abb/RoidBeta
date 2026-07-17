@@ -1,6 +1,6 @@
 """Route layer: human-in-the-loop color selection and frozen hold targets."""
 
-from .holds import Hold, RouteMask, extract_holds
+from .holds import Hold, HoldRole, RouteMask, extract_holds
 from .selector import (
     RouteSelection,
     RouteSelector,
@@ -10,6 +10,7 @@ from .selector import (
 
 __all__ = [
     "Hold",
+    "HoldRole",
     "RouteMask",
     "extract_holds",
     "RouteSelector",

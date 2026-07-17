@@ -3,5 +3,11 @@
 from .buffer import LatestFrameBuffer
 from .continuity import ContinuityCameraSource
 from .frame_source import FrameSource
+from .video_file import VideoFileSource
 
-__all__ = ["FrameSource", "LatestFrameBuffer", "ContinuityCameraSource"]
+__all__ = [
+    "FrameSource",
+    "LatestFrameBuffer",
+    "ContinuityCameraSource",
+    "VideoFileSource",
+]

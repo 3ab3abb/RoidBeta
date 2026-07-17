@@ -14,6 +14,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import IntEnum
 
+from .. import config
+
 
 class Landmark(IntEnum):
     """MediaPipe Pose landmark indices, named.
@@ -67,6 +69,27 @@ FOOT_LANDMARKS = (
     Landmark.RIGHT_HEEL,
 )
 
+# Face landmarks (nose, eyes, ears, mouth). Excluded from the drawn skeleton.
+FACE_LANDMARKS = frozenset({
+    Landmark.NOSE,
+    Landmark.LEFT_EYE_INNER, Landmark.LEFT_EYE, Landmark.LEFT_EYE_OUTER,
+    Landmark.RIGHT_EYE_INNER, Landmark.RIGHT_EYE, Landmark.RIGHT_EYE_OUTER,
+    Landmark.LEFT_EAR, Landmark.RIGHT_EAR,
+    Landmark.MOUTH_LEFT, Landmark.MOUTH_RIGHT,
+})
+
+# Left / right body sides, used to color-code the skeleton.
+LEFT_SIDE = frozenset({
+    Landmark.LEFT_SHOULDER, Landmark.LEFT_ELBOW, Landmark.LEFT_WRIST,
+    Landmark.LEFT_HIP, Landmark.LEFT_KNEE, Landmark.LEFT_ANKLE,
+    Landmark.LEFT_HEEL, Landmark.LEFT_FOOT_INDEX,
+})
+RIGHT_SIDE = frozenset({
+    Landmark.RIGHT_SHOULDER, Landmark.RIGHT_ELBOW, Landmark.RIGHT_WRIST,
+    Landmark.RIGHT_HIP, Landmark.RIGHT_KNEE, Landmark.RIGHT_ANKLE,
+    Landmark.RIGHT_HEEL, Landmark.RIGHT_FOOT_INDEX,
+})
+
 
 @dataclass(frozen=True)
 class Keypoint:
@@ -95,3 +118,33 @@ class PoseFrame:
 
     def get(self, landmark: Landmark) -> Keypoint:
         return self.keypoints[int(landmark)]
+
+
+def center_of_mass(
+    pose: PoseFrame,
+    min_visibility: float = config.KEYPOINT_MIN_VISIBILITY,
+) -> tuple[float, float] | None:
+    """Approximate whole-body center of mass in normalized coordinates.
+
+    This is a single-camera approximation, not a true COM: it weights the hip
+    midpoint more than the shoulder midpoint (0.6 / 0.4), placing the marker in
+    the lower torso where a climber's mass concentrates. Returns None when
+    neither the hips nor the shoulders are visible enough to estimate. Reused by
+    the Layer B center-of-mass sway metric so the estimate is defined once.
+    """
+
+    def midpoint(a: Landmark, b: Landmark) -> tuple[float, float] | None:
+        ka, kb = pose.get(a), pose.get(b)
+        if ka.visibility < min_visibility or kb.visibility < min_visibility:
+            return None
+        return (ka.x + kb.x) / 2.0, (ka.y + kb.y) / 2.0
+
+    hips = midpoint(Landmark.LEFT_HIP, Landmark.RIGHT_HIP)
+    shoulders = midpoint(Landmark.LEFT_SHOULDER, Landmark.RIGHT_SHOULDER)
+
+    if hips is not None and shoulders is not None:
+        return (
+            0.6 * hips[0] + 0.4 * shoulders[0],
+            0.6 * hips[1] + 0.4 * shoulders[1],
+        )
+    return hips or shoulders

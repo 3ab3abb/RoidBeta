@@ -219,3 +219,9 @@ __marimo__/
 
 # Downloaded off-the-shelf model assets (fetched on first run, not source).
 models/
+
+# Recorded attempt clips (user data, not source).
+clips/
+
+# Saved reference trajectory (user data, not source).
+data/

@@ -28,6 +28,7 @@ class State(Enum):
     READY = auto()
     ATTEMPT_ACTIVE = auto()
     COMPLETED = auto()
+    REVIEW = auto()  # replaying the recorded attempt to keep or discard it
 
 
 # Allowed transitions. Anything not listed here is rejected.
@@ -36,7 +37,8 @@ _ALLOWED: dict[State, frozenset[State]] = {
     State.ROUTE_SELECT: frozenset({State.READY, State.IDLE}),  # IDLE = cancel
     State.READY: frozenset({State.ATTEMPT_ACTIVE, State.ROUTE_SELECT}),
     State.ATTEMPT_ACTIVE: frozenset({State.COMPLETED, State.READY}),  # READY = abort
-    State.COMPLETED: frozenset({State.READY, State.ROUTE_SELECT}),
+    State.COMPLETED: frozenset({State.READY, State.ROUTE_SELECT, State.REVIEW}),
+    State.REVIEW: frozenset({State.COMPLETED}),
 }
 
 
@@ -98,6 +100,14 @@ class StateMachine:
         """Top reached: ATTEMPT_ACTIVE -> COMPLETED. Freezes the elapsed time."""
         self._transition(State.COMPLETED)
         self._attempt_end = self._clock()
+
+    def begin_review(self) -> None:
+        """Enter REVIEW from COMPLETED to replay the recorded attempt."""
+        self._transition(State.REVIEW)
+
+    def end_review(self) -> None:
+        """Return to COMPLETED after the clip has been kept or discarded."""
+        self._transition(State.COMPLETED)
 
     def reset(self) -> None:
         """Return to READY keeping the same route (abort or retry)."""
