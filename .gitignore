@@ -228,3 +228,6 @@ data/
 
 # macOS
 .DS_Store
+
+# Design doc kept local, not in the repo
+Roidβ.md

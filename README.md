@@ -7,8 +7,6 @@ the attempt live: hold-contact progress first, then movement quality on top.
 Part of the **Roid** family (RoidOME, RoidOTA, Roidβ). "β" is the climbing term for
 the *beta* of a route (its movement/sequence information).
 
-See [Roidβ.md](Roid%CE%B2.md) for the full design rationale and constraints.
-
 ---
 
 ## What it does
