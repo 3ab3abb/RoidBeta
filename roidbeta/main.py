@@ -1,34 +1,30 @@
 """Roidbeta entry point.
 
-Build order progress:
-  step 1 (done): live frames on screen via the Continuity Camera source.
-  step 2 (done): MediaPipe pose keypoints drawn live on the climber.
-  step 3 (done): human-in-the-loop route selection + frozen holds drawn live.
-  step 4 (done): explicit state machine driving the flow with keyboard controls.
-  step 5 (done): Layer A hold-contact scoring with automatic top-out completion.
-  plus: the attempt is recorded and can be replayed and kept or discarded.
+Flow:
+    SETUP -> ROUTE_SELECT -> READY -> ATTEMPT_ACTIVE -> COMPLETED -> REVIEW
+                               ^                            |          |
+                               +----- RESET (retry /--------+----------+
+                                       next climber)        |
+                                                            v (session, last done)
+                                                        COMPARISON -> SETUP
 
-    IDLE -> ROUTE_SELECT -> READY -> ATTEMPT_ACTIVE -> COMPLETED -> REVIEW
-                              ^                             |          |
-                              +-------- RESET --------------+----------+
+SETUP chooses solo (classic single climber) or a session of several climbers who
+take turns on one shared route and are compared on a skill-graph radar. A send is
+a controlled top: both hands on the top hold for a 3s countdown (shown big).
 
-The annotated attempt is recorded to a temp file while ATTEMPT_ACTIVE. From
-COMPLETED, P replays it in this same window; in REVIEW, S saves the clip and D
-discards it. Pose and the scorer run only in ATTEMPT_ACTIVE.
+Live camera uses wall-clock time and drops stale frames. A --video source is
+frame-accurate: every frame is processed in order, and timing plus the exported
+clip come from the video's own fps, so nothing runs fast or loses frames.
 
-Run live (Continuity Camera):
+Run live:
     python -m roidbeta.main
-Run on a recorded video (for testing the pipeline):
-    python -m roidbeta.main --video path/to/clip.mp4 [--loop] [--fps 30]
-A video source starts paused on the first frame so you can select the route,
-then plays through once the attempt starts. Keys are shown live in the HUD per
-state. Q or Esc quits.
+Run on a recording:
+    python -m roidbeta.main --video path/to/clip.mov [--loop] [--fps 30]
 """
 
 from __future__ import annotations
 
 import argparse
-import time
 
 import cv2
 
@@ -39,27 +35,35 @@ from .display import (
     MetricCard,
     draw_balance,
     draw_bottom_bar,
+    draw_climber_tag,
+    draw_comparison,
+    draw_countdown,
     draw_hint,
     draw_holds,
     draw_pose,
     draw_results_card,
+    draw_setup_screen,
     draw_status_card,
     draw_top_banner,
     draw_trajectory,
+    theme,
 )
-from .display import theme
 from .pose import PoseEstimator
 from .recording import AttemptRecorder
 from .reference import clear_trajectory, load_trajectory, save_trajectory
 from .route import RouteSelector
-from .scoring import Scorer, ScoreState
+from .scoring import Scorer, ScoreState, build_profile
+from .session import Session
 from .state import State, StateMachine
 
 _QUIT_KEYS = (ord("q"), 27)
 _REFERENCE_TRAIL_COLOR = (200, 200, 200)  # grey ghost trail for the reference path
+_UP_KEYS = (ord("+"), ord("="), 82)       # 82 = arrow-up in many highgui builds
+_DOWN_KEYS = (ord("-"), ord("_"), 84)     # 84 = arrow-down
 
 
 def _wait_for_first_frame(source: FrameSource, timeout_s: float = 10.0):
+    import time
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         seq, frame = source.latest()
@@ -70,7 +74,6 @@ def _wait_for_first_frame(source: FrameSource, timeout_s: float = 10.0):
 
 
 def _metric_cards(scorer: Scorer | None, score: ScoreState | None) -> list[MetricCard]:
-    """One MetricCard per Layer B metric for the bottom bar."""
     if scorer is None:
         return []
     current = score.balance.balance_score if score else None
@@ -78,29 +81,20 @@ def _metric_cards(scorer: Scorer | None, score: ScoreState | None) -> list[Metri
 
 
 def _average_balance(scorer: Scorer | None) -> float | None:
-    """Mean balance over the attempt, ignoring frames where it was unscorable."""
     if scorer is None:
         return None
     vals = [v for v in scorer.history.balance_history if v is not None]
     return sum(vals) / len(vals) if vals else None
 
 
-def _hud_state(
-    machine: StateMachine,
-    score: ScoreState | None,
-    scorer: Scorer | None,
-    has_reference: bool,
-) -> HudState:
-    """Build the dashboard model for the current state."""
+def _hud_state(machine, score, scorer, has_reference, session) -> HudState:
     state = machine.state
     contact = score.contact if score else None
     reached = (contact.highest_rank or 0) if contact else 0
     used = contact.used_count if contact else 0
     total = contact.total_holds if contact else 0
+    is_session = session is not None and not session.is_solo
 
-    if state is State.IDLE:
-        return HudState("IDLE", theme.TEXT_MUTED, has_reference=has_reference,
-                        controls=["S  select route", "Q  quit"])
     if state is State.READY:
         n = len(machine.route.holds) if machine.route else 0
         return HudState("READY", theme.PRIMARY, total=n, has_reference=has_reference,
@@ -114,28 +108,47 @@ def _hud_state(
             controls=["C  complete", "R  reset", "Q  quit"],
         )
     if state is State.COMPLETED:
+        next_ctrl = "N  next climber" if is_session else "N  new route"
         return HudState(
             "COMPLETED", theme.SUCCESS,
             timer=f"{machine.attempt_elapsed_s or 0.0:.1f}s",
             reached=reached, used=used, total=total, show_progress=True,
             has_reference=has_reference, avg_balance=_average_balance(scorer),
             metrics=_metric_cards(scorer, score),
-            controls=["P  replay", "F  set reference", "X  clear reference",
-                      "R  retry", "N  new route", "Q  quit"],
+            controls=["P  replay", "F  set ref", "X  clear ref",
+                      "R  retry", next_ctrl, "Q  quit"],
         )
     return HudState(state.name, theme.TEXT_MUTED)
 
 
-def _review_clip(recorder: AttemptRecorder | None) -> str:
-    """Replay the recorded attempt on a loop until the user decides.
+def _comparison_data(session: Session):
+    """Build (entries, leaders) for the comparison screen from a session."""
+    entries = [
+        (c.label, c.color, p.axis_values())
+        for c, p in zip(session.climbers, session.results)
+    ]
+    pairs = list(zip(session.climbers, session.results))
+    leaders = []
+    if pairs:
+        def leader(name, value_fn, fmt):
+            c, p = max(pairs, key=lambda cp: value_fn(cp[1]))
+            return (name, c.label, fmt(value_fn(p)))
 
-    Returns "save", "discard", or "quit". "discard" immediately if there is no
-    clip to show.
-    """
+        leaders.append(leader("Balance", lambda p: p.balance or 0.0, lambda v: f"{v:.2f}"))
+        leaders.append(leader("Smoothness", lambda p: p.smoothness or 0.0, lambda v: f"{v:.2f}"))
+        leaders.append(leader("Speed", lambda p: p.speed, lambda v: f"{v:.2f}/s"))
+        leaders.append(leader("Reach", lambda p: p.reach, lambda v: f"{int(v * 100)}%"))
+        topped = [(c, p) for c, p in pairs if p.completed]
+        if topped:
+            c, p = min(topped, key=lambda cp: cp[1].time_s)
+            leaders.append(("Time", c.label, f"{p.time_s:.1f}s"))
+    return entries, leaders
+
+
+def _review_clip(recorder: AttemptRecorder | None) -> str:
     if recorder is None or not recorder.has_frames:
         return "discard"
-    recorder.finalize()  # ensure the temp file is closed before reading it
-
+    recorder.finalize()
     cap = cv2.VideoCapture(str(recorder.temp_path))
     if not cap.isOpened():
         return "discard"
@@ -143,7 +156,7 @@ def _review_clip(recorder: AttemptRecorder | None) -> str:
     try:
         while True:
             ok, frame = cap.read()
-            if not ok:  # reached the end: loop back to the start
+            if not ok:
                 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 continue
             draw_top_banner(frame, "REVIEW",
@@ -168,25 +181,56 @@ def run(source: FrameSource) -> None:
             print("No frames from the source. Is the camera connected / video valid?")
             return
 
-        machine = StateMachine()
+        machine = StateMachine(clock=source.position_seconds)
         selector = RouteSelector()
+        session: Session | None = None
+        setup = {"mode": "solo", "count": 2}
         pose = None
         scorer: Scorer | None = None
         score: ScoreState | None = None
         recorder: AttemptRecorder | None = None
-        summary_written = False  # have the end-of-clip results frames been appended
-        reference = load_trajectory(config.REFERENCE_PATH)  # ghost trail, if any
+        summary_written = False
+        profile_saved = False
+        reference = load_trajectory(config.REFERENCE_PATH)
         last_seq = 0
 
-        while True:
-            # A finite (video) source plays only during an active attempt, and
-            # holds its frame the rest of the time so the route can be selected.
-            if machine.state is State.ATTEMPT_ACTIVE:
-                source.resume()
-            else:
-                source.pause()
+        def reset_attempt():
+            nonlocal scorer, score, recorder, summary_written, profile_saved, pose
+            if recorder is not None:
+                recorder.discard()
+            scorer = None
+            score = None
+            pose = None
+            recorder = None
+            summary_written = False
+            profile_saved = False
 
-            # ROUTE_SELECT and REVIEW each own their own blocking sub-loop.
+        while True:
+            # --- SETUP: mode select + climber count ---
+            if machine.state is State.SETUP:
+                _, base = source.latest()
+                frame = base.copy()
+                draw_setup_screen(frame, setup["mode"], setup["count"])
+                cv2.imshow(config.OVERLAY_WINDOW_NAME, frame)
+                key = cv2.waitKey(20) & 0xFF
+                if key in _QUIT_KEYS:
+                    break
+                if key == ord("s"):
+                    setup["mode"] = "solo"
+                elif key == ord("m"):
+                    setup["mode"] = "session"
+                    setup["count"] = max(2, setup["count"])
+                elif key in _UP_KEYS and setup["mode"] == "session":
+                    setup["count"] = min(6, setup["count"] + 1)
+                elif key in _DOWN_KEYS and setup["mode"] == "session":
+                    setup["count"] = max(2, setup["count"] - 1)
+                elif key in (13, ord(" ")):  # confirm
+                    count = 1 if setup["mode"] == "solo" else setup["count"]
+                    session = Session.create(count)
+                    machine.begin_route_select()
+                continue
+
+            # --- ROUTE_SELECT: blocking sub-loop ---
             if machine.state is State.ROUTE_SELECT:
                 _, snapshot = source.latest()
                 selection = selector.select(snapshot.copy())
@@ -196,46 +240,78 @@ def run(source: FrameSource) -> None:
                     machine.set_route(selection.route)
                 continue
 
+            # --- REVIEW: blocking replay ---
             if machine.state is State.REVIEW:
                 decision = _review_clip(recorder)
                 if decision == "quit":
                     break
                 if decision == "save" and recorder is not None:
                     print(f"Saved clip: {recorder.keep()}")
-                    recorder = None  # moved to its permanent path
+                    recorder = None
                 machine.end_review()
                 continue
 
-            seq, frame = source.latest()
-            if seq == 0 or frame is None:
+            # --- COMPARISON: session results ---
+            if machine.state is State.COMPARISON:
+                _, base = source.latest()
+                frame = base.copy()
+                entries, leaders = _comparison_data(session)
+                draw_comparison(frame, entries, leaders)
+                cv2.imshow(config.OVERLAY_WINDOW_NAME, frame)
+                key = cv2.waitKey(20) & 0xFF
+                if key in _QUIT_KEYS:
+                    break
+                if key == ord("r"):
+                    machine.new_session()
+                    session = None
+                continue
+
+            # --- live states: step the source, then read the current frame ---
+            if machine.state is State.ATTEMPT_ACTIVE:
+                if source.is_realtime:
+                    source.resume()
+                else:
+                    source.advance()
+            elif source.is_realtime:
+                source.pause()
+
+            seq, base = source.latest()
+            if seq == 0 or base is None:
                 if cv2.waitKey(10) & 0xFF in _QUIT_KEYS:
                     break
                 continue
+            frame = base.copy()
 
             was_active = machine.state is State.ATTEMPT_ACTIVE
             new_frame = False
             if was_active:
-                if recorder is None:  # first frame of the attempt
-                    recorder = AttemptRecorder()
+                if recorder is None:
+                    recorder = AttemptRecorder(
+                        fps=source.nominal_fps or config.REPLAY_FPS,
+                        measured=source.is_realtime,
+                    )
                     summary_written = False
                 if scorer is None:
                     scorer = Scorer(machine.route)
+                now = machine.attempt_elapsed_s or 0.0
                 if seq != last_seq:
                     last_seq = seq
                     new_frame = True
                     pose = pose_estimator.estimate(frame)
-                    height, width = frame.shape[:2]
-                    score = scorer.update(pose, width, height)
+                    h, w = frame.shape[:2]
+                    score = scorer.update(pose, w, h, now)
                     if scorer.completed:
                         machine.complete()
+                # A finished video ends the attempt (may be a non-send).
+                if (machine.state is State.ATTEMPT_ACTIVE
+                        and not source.is_realtime and source.is_finished):
+                    machine.complete()
 
-            # Draw the frozen route, colored by scoring state where available.
+            # --- draw ---
             if machine.route is not None:
                 used = score.contact.used_indices if score else frozenset()
                 touched = score.contact.touched_indices if score else frozenset()
                 draw_holds(frame, machine.route.holds, used, touched)
-            # CoM trails: the reference (ghost) under the current attempt's path.
-            # Shown during the attempt and while COMPLETED (the scorer persists).
             if scorer is not None:
                 if reference:
                     draw_trajectory(frame, reference, fade=False,
@@ -245,95 +321,94 @@ def run(source: FrameSource) -> None:
                 draw_pose(frame, pose)
                 if score is not None:
                     draw_balance(frame, score.balance)
-            hud = _hud_state(machine, score, scorer, reference is not None)
+
+            hud = _hud_state(machine, score, scorer, reference is not None, session)
             draw_status_card(frame, hud)
-            if hud.metrics:  # bottom metrics bar appears once the attempt starts
+            if session is not None and not session.is_solo and machine.state in (
+                State.READY, State.ATTEMPT_ACTIVE, State.COMPLETED
+            ):
+                c = session.current
+                draw_climber_tag(frame, f"{c.label}  ({session.position_label})", c.color)
+            if hud.metrics:
                 draw_bottom_bar(frame, hud)
             else:
-                draw_hint(frame, hud.controls)  # slim key hint before that
+                draw_hint(frame, hud.controls)
+            if was_active and score is not None and score.contact.top_countdown is not None:
+                draw_countdown(frame, score.contact.top_countdown,
+                               config.TOP_HOLD_COMPLETION_SECONDS)
             if machine.state is State.COMPLETED:
                 draw_results_card(frame, hud)
 
-            # Record the displayed attempt frame (what the user saw).
+            # --- record ---
             if was_active and new_frame and recorder is not None:
                 recorder.add(frame)
-            # On completion, append a few seconds of the results card so the saved
-            # clip (and the replay) ends on the score window, then close the file.
             if (machine.state is State.COMPLETED and recorder is not None
                     and not summary_written):
-                # Hold the results frame for a few seconds at the measured fps, so
-                # the summary lasts CLIP_SUMMARY_SECONDS regardless of frame rate.
-                n_summary = int(config.CLIP_SUMMARY_SECONDS * recorder.fps)
-                for _ in range(n_summary):
+                for _ in range(int(config.CLIP_SUMMARY_SECONDS * recorder.fps)):
                     recorder.add(frame, realtime=False)
                 recorder.finalize()
                 summary_written = True
+            # Store this climber's profile once, on entering COMPLETED.
+            if (machine.state is State.COMPLETED and session is not None
+                    and scorer is not None and score is not None and not profile_saved):
+                session.record(build_profile(
+                    session.current.label, scorer.history, score.contact,
+                    machine.attempt_elapsed_s or 0.0,
+                ))
+                profile_saved = True
 
+            # --- keys ---
             cv2.imshow(config.OVERLAY_WINDOW_NAME, frame)
             key = cv2.waitKey(1) & 0xFF
             if key in _QUIT_KEYS:
                 break
-            if machine.state is State.COMPLETED and key == ord("f") and scorer is not None:
-                # Remember this attempt's CoM path as the reference for later ones.
-                reference = list(scorer.history.com_trajectory)
-                path = save_trajectory(config.REFERENCE_PATH, reference)
-                print(f"Saved reference trajectory ({len(reference)} frames): {path}")
-            elif machine.state is State.COMPLETED and key == ord("x"):
-                if clear_trajectory(config.REFERENCE_PATH):
-                    print("Cleared reference trajectory.")
-                reference = None
-            elif _handle_key(key, machine):
-                pose = None
-                # Leaving the attempt/completed flow entirely: drop scoring and
-                # discard the unsaved recording.
-                if machine.state in (State.READY, State.IDLE, State.ROUTE_SELECT):
-                    scorer = None
-                    score = None
-                    if recorder is not None:
-                        recorder.discard()
-                        recorder = None
+            state = machine.state
+            if state is State.READY:
+                if key == ord(" "):
+                    reset_attempt()
+                    machine.start_attempt()
+                elif key == ord("n"):
+                    reset_attempt()
+                    machine.begin_route_select()
+            elif state is State.ATTEMPT_ACTIVE:
+                if key == ord("c"):        # manual finish (debug / mantle tops)
+                    machine.complete()
+                elif key == ord("r"):
+                    machine.reset()
+                    reset_attempt()
+            elif state is State.COMPLETED:
+                if key == ord("p"):
+                    machine.begin_review()
+                elif key == ord("f") and scorer is not None:
+                    reference = list(scorer.history.com_trajectory)
+                    print(f"Saved reference: "
+                          f"{save_trajectory(config.REFERENCE_PATH, reference)}")
+                elif key == ord("x"):
+                    if clear_trajectory(config.REFERENCE_PATH):
+                        print("Cleared reference trajectory.")
+                    reference = None
+                elif key == ord("r"):      # retry the same climber
+                    machine.reset()
+                    reset_attempt()
+                elif key == ord("n"):
+                    if session is not None and not session.is_solo:
+                        if session.is_last:
+                            machine.begin_comparison()
+                        else:
+                            session.advance()
+                            machine.reset()
+                        reset_attempt()
+                    else:
+                        machine.begin_route_select()
+                        reset_attempt()
 
         if recorder is not None:
-            recorder.discard()  # quit without saving: clean up the temp file
+            recorder.discard()
 
     cv2.destroyAllWindows()
 
 
-def _handle_key(key: int, machine: StateMachine) -> bool:
-    """Apply a keypress to the machine. Returns True if the state changed."""
-    state = machine.state
-    if state is State.IDLE and key == ord("s"):
-        machine.begin_route_select()
-        return True
-    if state is State.READY:
-        if key == ord(" "):
-            machine.start_attempt()
-            return True
-        if key == ord("n"):
-            machine.begin_route_select()
-            return True
-    if state is State.ATTEMPT_ACTIVE:
-        if key == ord("c"):  # debug force-complete; normally the scorer completes
-            machine.complete()
-            return True
-        if key == ord("r"):
-            machine.reset()
-            return True
-    if state is State.COMPLETED:
-        if key == ord("p"):
-            machine.begin_review()
-            return True
-        if key == ord("r"):
-            machine.reset()
-            return True
-        if key == ord("n"):
-            machine.begin_route_select()
-            return True
-    return False
-
-
 def _build_source(args: argparse.Namespace) -> FrameSource:
-    """Pick the frame source from CLI args: a video file, or the live camera."""
     if args.video:
         return VideoFileSource(args.video, loop=args.loop, fps=args.fps or None)
     return ContinuityCameraSource()
@@ -341,18 +416,11 @@ def _build_source(args: argparse.Namespace) -> FrameSource:
 
 def _parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="roidbeta", description=__doc__)
-    parser.add_argument(
-        "--video", metavar="PATH",
-        help="run the pipeline on a recorded video file instead of the live camera",
-    )
-    parser.add_argument(
-        "--loop", action="store_true",
-        help="loop the video file (repeats from the start on reaching the end)",
-    )
-    parser.add_argument(
-        "--fps", type=float, default=0.0,
-        help="override video playback fps (0 = use the file's own fps)",
-    )
+    parser.add_argument("--video", metavar="PATH",
+                        help="run on a recorded video file instead of the live camera")
+    parser.add_argument("--loop", action="store_true", help="loop the video file")
+    parser.add_argument("--fps", type=float, default=0.0,
+                        help="override video fps (0 = the file's own fps)")
     return parser.parse_args(argv)
 
 

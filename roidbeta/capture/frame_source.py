@@ -7,6 +7,7 @@ without touching pose, scoring, or display code.
 
 from __future__ import annotations
 
+import time
 from abc import ABC, abstractmethod
 
 import numpy as np
@@ -57,10 +58,36 @@ class FrameSource(ABC):
     def resume(self) -> None:
         """Resume advancing frames. No-op for live sources."""
 
+    def advance(self) -> None:
+        """Pull the next frame (frame-accurate sources). No-op for threaded ones."""
+
     @property
     def is_finished(self) -> bool:
         """True when a finite source has reached its end. Always False if live."""
         return False
+
+    @property
+    def is_realtime(self) -> bool:
+        """True for a live source; False for a frame-accurate (video) source.
+
+        A real-time source is driven by its own thread and is paced by the wall
+        clock; a frame-accurate source is pulled one frame at a time via advance()
+        and its time comes from the media, so no frames are dropped.
+        """
+        return True
+
+    @property
+    def nominal_fps(self) -> float | None:
+        """The source's known frame rate, or None if it must be measured (live)."""
+        return None
+
+    def position_seconds(self) -> float:
+        """Current time in seconds: wall clock for live, media time for video.
+
+        Used as the state machine's clock so attempt timing is exact on recorded
+        video (independent of processing speed) and real time on the live camera.
+        """
+        return time.monotonic()
 
     def __enter__(self) -> "FrameSource":
         self.start()

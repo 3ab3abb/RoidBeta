@@ -33,6 +33,7 @@ class ContactState:
     touched_indices: frozenset[int]  # holds a keypoint is inside this frame
     used_indices: frozenset[int]     # holds confirmed used (held for N frames)
     completed: bool
+    top_countdown: float | None = None  # seconds left on the controlled-top hold, else None
 
 
 def _pixel_points(pose: PoseFrame, landmarks, width: int, height: int, min_vis: float):
@@ -50,16 +51,16 @@ class ContactTracker:
     """Stateful Layer A tracker, updated once per processed pose frame.
 
     A hold becomes "used" once a hand or foot keypoint stays within its radius
-    for contact_frames consecutive frames. Completion is stricter: a hand
-    keypoint must stay within the top hold for completion_frames consecutive
-    frames (feet on the top hold do not count as a send).
+    for contact_frames consecutive frames. Completion is a controlled top: both
+    hands must stay on the top hold (feet do not count) for completion_seconds;
+    if a hand comes off, the countdown resets.
     """
 
     def __init__(
         self,
         route: RouteMask,
         contact_frames: int = config.HOLD_CONTACT_FRAMES_N,
-        completion_frames: int = config.TOP_HOLD_COMPLETION_FRAMES_N,
+        completion_seconds: float = config.TOP_HOLD_COMPLETION_SECONDS,
         top_hands_required: int = config.TOP_HOLD_HANDS_REQUIRED,
         completion_radius_scale: float = config.TOP_HOLD_COMPLETION_RADIUS_SCALE,
         min_visibility: float = config.KEYPOINT_MIN_VISIBILITY,
@@ -67,18 +68,18 @@ class ContactTracker:
         self._holds = route.holds
         self._top_index = route.top_index  # the user-designated finish hold
         self._contact_frames = contact_frames
-        self._completion_frames = completion_frames
+        self._completion_seconds = completion_seconds
         self._top_hands_required = top_hands_required
         self._completion_radius_scale = completion_radius_scale
         self._min_vis = min_visibility
 
         self._streak = [0] * len(self._holds)   # consecutive touched frames per hold
         self._used: set[int] = set()
-        # Completion is per-hand: each wrist independently "matches" the top hold
-        # once it stays on it long enough, and matches persist. A send is when
-        # enough hands have matched, so a one-hand-then-the-other top counts.
-        self._hand_top_streak = {lm: 0 for lm in HAND_LANDMARKS}
-        self._matched_hands: set = set()
+        # Controlled top: both hands must stay on the top hold for
+        # completion_seconds. _top_since is the time (seconds) both hands first
+        # landed and have stayed; it resets to None the moment a hand comes off.
+        self._top_since: float | None = None
+        self._top_countdown: float | None = None
         self._completed = False
 
     def _touching(self, hold, points) -> bool:
@@ -92,8 +93,11 @@ class ContactTracker:
             if (px - hold.x) ** 2 + (py - hold.y) ** 2 <= r2
         )
 
-    def update(self, pose: PoseFrame | None, width: int, height: int) -> ContactState:
+    def update(
+        self, pose: PoseFrame | None, width: int, height: int, now: float = 0.0
+    ) -> ContactState:
         touched: set[int] = set()
+        self._top_countdown = None
 
         if pose is not None and self._holds:
             hands = _pixel_points(pose, HAND_LANDMARKS, width, height, self._min_vis)
@@ -109,31 +113,25 @@ class ContactTracker:
                 else:
                     self._streak[i] = 0
 
-            # Completion: each hand matches the top hold independently (with an
-            # enlarged radius so a realistic top-out registers). A hand that has
-            # matched stays matched, so matching one hand then the other counts.
+            # Controlled top: both hands on the top hold at once (enlarged radius,
+            # feet excluded) start a countdown; holding for completion_seconds is
+            # a send. Any hand coming off resets it.
             if self._top_index is not None:
                 top = self._holds[self._top_index]
                 radius = top.radius * self._completion_radius_scale
-                for hand_lm in HAND_LANDMARKS:
-                    kp = pose.get(hand_lm)
-                    if kp.visibility < self._min_vis:
-                        self._hand_top_streak[hand_lm] = 0
-                        continue
-                    point = (kp.x * width, kp.y * height)
-                    if self._count_inside(top, [point], radius):
-                        self._hand_top_streak[hand_lm] += 1
-                        if self._hand_top_streak[hand_lm] >= self._completion_frames:
-                            self._matched_hands.add(hand_lm)
-                    else:
-                        self._hand_top_streak[hand_lm] = 0
-                if len(self._matched_hands) >= self._top_hands_required:
-                    self._completed = True
+                if self._count_inside(top, hands, radius) >= self._top_hands_required:
+                    if self._top_since is None:
+                        self._top_since = now
+                    held = now - self._top_since
+                    self._top_countdown = max(0.0, self._completion_seconds - held)
+                    if held >= self._completion_seconds:
+                        self._completed = True
+                else:
+                    self._top_since = None
         else:
-            # No usable pose this frame: break contact streaks, keep results.
+            # No usable pose this frame: break streaks and reset the top hold.
             self._streak = [0] * len(self._holds)
-            for lm in self._hand_top_streak:
-                self._hand_top_streak[lm] = 0
+            self._top_since = None
 
         return self._state(touched)
 
@@ -149,6 +147,7 @@ class ContactTracker:
             touched_indices=frozenset(touched),
             used_indices=frozenset(self._used),
             completed=self._completed,
+            top_countdown=self._top_countdown,
         )
 
     @property

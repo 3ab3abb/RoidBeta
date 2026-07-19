@@ -14,15 +14,20 @@ See [Roidβ.md](Roid%CE%B2.md) for the full design rationale and constraints.
 ## What it does
 
 1. Reads a live feed (iPhone via Continuity Camera) or a recorded video file.
-2. You select a route: each route is one color, so you click a representative
+2. You pick a mode: **solo** (one climber, the classic flow) or a **session** of
+   several climbers who take turns on one shared route and are compared.
+3. You select a route: each route is one color, so you click a representative
    hold, its HSV neighborhood is sampled from the actual frame, and a hold mask
    is built and frozen. You also designate the START and TOP holds.
-3. You start an attempt. The system tracks pose (MediaPipe, 33 keypoints) and
-   scores movement in real time.
-4. A live overlay shows the skeleton, the route holds (colored by contact state),
+4. Each climber attempts the route. The system tracks pose (MediaPipe, 33
+   keypoints) and scores movement in real time.
+5. A live overlay shows the skeleton, the route holds (colored by contact state),
    a center-of-gravity trail, a balance chart, and a running score/time.
-5. On top-out it auto-completes, freezes the clock, and shows a session summary.
-   The annotated attempt can be replayed and saved as a clip.
+6. A send is a **controlled top**: both hands on the top hold for a 3-second
+   countdown (shown big). On top-out the clock freezes and a session summary
+   appears. The annotated attempt can be replayed and saved as a clip.
+7. In a session, after everyone has climbed, a **skill-graph** compares the
+   climbers on Balance / Smoothness / Speed / Reach, with per-metric leaderboards.
 
 ---
 
@@ -57,9 +62,11 @@ On a recorded video (for testing the pipeline without the wall):
 .venv/bin/python -m roidbeta.main --video path/to/clip.mov [--loop] [--fps 30]
 ```
 
-A video source starts paused on the first frame so you can select the route,
-then plays through once the attempt starts. `.mov` and `.mp4` both work; if an
-iPhone HEVC `.mov` fails to open, transcode once with
+A video source is **frame-accurate**: it processes every frame in order (no
+dropping), and the on-screen timer and the exported clip both come from the
+video's own fps, so timing is exact regardless of processing speed. The live
+camera keeps its real-time, drop-stale-frames behavior. `.mov` and `.mp4` both
+work; if an iPhone HEVC `.mov` fails to open, transcode once with
 `ffmpeg -i in.mov -c:v libx264 -pix_fmt yuv420p -an out.mp4`.
 
 ### Optional: a `BETA` shell function (fish)
@@ -97,17 +104,20 @@ end
 | `[` / `]` | Shrink / grow the manual hold radius |
 | `R` | Reset | `Enter`/`C` confirm (a TOP is required) | `Q`/`Esc` cancel |
 
-**Session flow:**
+**Flow:**
 
 | State | Keys |
 | --- | --- |
-| IDLE | `S` select route |
+| SETUP | `S` solo · `M` session · `+`/`-` climber count · `Enter` start |
 | READY | `SPACE` start · `N` new route |
 | ATTEMPT | `C` complete (manual fallback) · `R` reset |
-| COMPLETED | `P` replay · `F` set reference · `X` clear reference · `R` retry · `N` new route |
+| COMPLETED | `P` replay · `F` set reference · `X` clear reference · `R` retry · `N` next climber / new route |
 | REVIEW | `S` save · `D` discard · `R` restart |
+| COMPARISON | `R` new session |
 
-`Q`/`Esc` quits from the live states.
+`Q`/`Esc` quits. During an attempt, once both hands are on the top hold a big
+3-second countdown appears; hold it to send. In a session, `N` at COMPLETED
+advances to the next climber, and the comparison screen shows after the last.
 
 ---
 
@@ -118,16 +128,28 @@ truth, built in two layers.
 
 **Layer A — hold-contact progress (objective).** A hold is *used* once a hand or
 foot stays within its radius for N frames. Tracks the highest hold reached, the
-count of holds used, and time. A send (completion) is two hands matching the
-designated TOP hold (each hand counts independently, so a one-hand-then-the-other
-top registers); completion freezes the clock and shows the summary.
+count of holds used, and time. A send is a **controlled top**: both hands on the
+designated TOP hold (enlarged radius, feet excluded) for a 3-second countdown; if
+a hand comes off, the countdown resets. Completion freezes the clock and shows
+the summary.
 
-**Layer B — movement quality (heuristic proxies).** Currently one metric:
-**center-of-mass over the base of support** — how well the CoM sits over the
-polygon of current contact points (balance). It is stabilized with EMA smoothing,
-sticky support (a contact stays in the base briefly after leaving a hold), and a
-CoM-stability–gated gap hold, so it reads steadily instead of flickering. This is
-a horizontal-plane proxy from a single camera, not ground truth.
+**Layer B — movement quality (heuristic proxies).** Each is a proxy, not truth.
+
+- **Balance** — center-of-mass over the base of support: how well the CoM sits
+  over the polygon of current contact points. Stabilized with EMA smoothing,
+  sticky support (a contact stays in the base briefly after leaving a hold), and
+  a CoM-stability–gated gap hold, so it reads steadily. Horizontal-plane proxy
+  from a single camera.
+- **Smoothness** — acceleration relative to speed along the CoG path (jerky,
+  stop-start movement scores low; flowing movement scores high).
+- **Speed** — holds reached per second.
+- **Reach** — fraction of the route reached.
+
+Each attempt is reduced to a **skill profile** across these axes. In a session,
+the profiles are compared on a **skill-graph radar** (each climber a "class"
+shape) plus per-metric leaderboards. Adding a metric is a matter of extending
+`SKILL_AXES` in [config.py](roidbeta/config.py) (a static-vs-dynamic "Dynamism"
+axis via jump detection is the next planned one).
 
 A CoM **trajectory trail** is drawn live; save an attempt's trail as a **reference**
 (`F`) and it is overlaid as a ghost on later attempts for visual comparison
@@ -139,20 +161,24 @@ work.
 ## Architecture
 
 ```
-FrameSource (Continuity Camera | video file)
-    -> single-slot latest-frame buffer (capture thread; drops stale frames)
+FrameSource (Continuity Camera: real-time, drops frames
+           | video file: frame-accurate, pulled in order)
+    -> single-slot latest-frame buffer
         -> RouteSelector (one-time, human-in-the-loop HSV sampling + frozen holds)
         -> PoseEstimator (MediaPipe Tasks PoseLandmarker, per frame)
-            -> Scorer (Layer A contact + Layer B balance, holds attempt state)
-                -> Display overlay + metrics dashboard (live)
+            -> Scorer (Layer A contact + Layer B metrics, holds attempt state)
+                -> Display overlay + metrics dashboard + skill graph (live)
 ```
 
 An explicit state machine (`state.py`) drives the flow:
-`IDLE → ROUTE_SELECT → READY → ATTEMPT_ACTIVE → COMPLETED → REVIEW`, with RESET
-back to READY. Pose and the scorer run only in `ATTEMPT_ACTIVE`.
+`SETUP → ROUTE_SELECT → READY → ATTEMPT_ACTIVE → COMPLETED → REVIEW`, and
+`COMPLETED → COMPARISON → SETUP` for sessions. RESET returns to READY (retry or
+next climber). Pose and the scorer run only in `ATTEMPT_ACTIVE`. The state
+machine's clock is the source's time (wall clock live, media time for video), so
+attempt timing is exact on recordings.
 
-All tunables (HSV tolerances, contact frame counts, metric weights, display
-sizes) live in [config.py](roidbeta/config.py).
+All tunables (HSV tolerances, contact frame counts, completion seconds, metric
+scales, skill axes, display sizes) live in [config.py](roidbeta/config.py).
 
 ## Layout
 
@@ -160,13 +186,14 @@ sizes) live in [config.py](roidbeta/config.py).
 roidbeta/
   main.py            entry point, state-machine wiring, CLI (--video)
   state.py           FSM
+  session.py         multi-climber roster + per-climber results
   config.py          all tunable parameters
   capture/           FrameSource interface, Continuity Camera, video file, buffer
   route/             HSV selection, hold extraction (watershed split), roles
   pose/              MediaPipe wrapper, keypoint structure, center-of-mass
-  scoring/           Layer A contact, Layer B metrics, attempt scorer
-  display/           theme + overlay + charts + dashboard (skeleton, holds, HUD)
-  recording.py       attempt clip recording (measured-fps) and storage
+  scoring/           Layer A contact, Layer B metrics, skill profile, scorer
+  display/           theme, overlay, charts, dashboard, skill graph, comparison
+  recording.py       attempt clip recording (correct-fps) and storage
   reference.py       save/load/clear the reference CoM trajectory
 tests/               pytest suite (no camera needed)
 ```

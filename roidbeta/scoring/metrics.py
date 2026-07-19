@@ -182,3 +182,51 @@ class BalanceTracker:
 
 def _dist(a, b) -> float:
     return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
+
+
+def compute_smoothness(
+    trajectory,
+    scale: float = config.SMOOTHNESS_SCALE,
+) -> float | None:
+    """Score how smooth a CoG path is, in [0, 1] (1 = glassy, 0 = jerky).
+
+    Heuristic proxy: the mean acceleration magnitude along the path relative to
+    the mean speed (roughness). Jerky, stop-start movement has high acceleration
+    per unit motion; a flowing climb has low. None gaps split the path so a jump
+    across a gap is not counted as acceleration. Returns None if there is too
+    little movement to judge.
+    """
+    # Contiguous runs of tracked points.
+    runs: list[list] = []
+    run: list = []
+    for p in trajectory:
+        if p is None:
+            if len(run) >= 3:
+                runs.append(run)
+            run = []
+        else:
+            run.append(p)
+    if len(run) >= 3:
+        runs.append(run)
+    if not runs:
+        return None
+
+    speeds: list[float] = []
+    accels: list[float] = []
+    for r in runs:
+        for i in range(len(r) - 2):
+            speeds.append(_dist(r[i + 1], r[i]))
+            # Acceleration = second difference; magnitude captures both speed and
+            # direction changes, so a zig-zag path scores as jerky as a stutter.
+            ax = r[i + 2][0] - 2 * r[i + 1][0] + r[i][0]
+            ay = r[i + 2][1] - 2 * r[i + 1][1] + r[i][1]
+            accels.append((ax * ax + ay * ay) ** 0.5)
+    if not speeds or sum(speeds) == 0:
+        return None
+
+    mean_speed = sum(speeds) / len(speeds)
+    mean_accel = sum(accels) / len(accels)
+    if mean_speed < 1e-6:
+        return None
+    roughness = mean_accel / mean_speed
+    return float(1.0 / (1.0 + roughness / scale))

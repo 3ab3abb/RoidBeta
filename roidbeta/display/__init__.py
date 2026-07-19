@@ -1,11 +1,15 @@
 """Display layer: live overlay drawing. Kept thin and swappable."""
 
+from .comparison import draw_comparison
 from .dashboard import (
     HudState,
     MetricCard,
     draw_bottom_bar,
+    draw_climber_tag,
+    draw_countdown,
     draw_hint,
     draw_results_card,
+    draw_setup_screen,
     draw_status_card,
     draw_top_banner,
 )
@@ -27,6 +31,10 @@ __all__ = [
     "draw_bottom_bar",
     "draw_hint",
     "draw_top_banner",
+    "draw_countdown",
+    "draw_setup_screen",
+    "draw_climber_tag",
+    "draw_comparison",
     "draw_results_card",
     "HudState",
     "MetricCard",

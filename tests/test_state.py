@@ -20,7 +20,7 @@ def _fake_route(n=3):
 
 def test_happy_path_reaches_completed():
     m = StateMachine()
-    assert m.state is State.IDLE
+    assert m.state is State.SETUP
 
     m.begin_route_select()
     assert m.state is State.ROUTE_SELECT
@@ -39,7 +39,7 @@ def test_happy_path_reaches_completed():
 
 def test_illegal_transition_raises():
     m = StateMachine()
-    # Cannot start an attempt straight from IDLE.
+    # Cannot start an attempt straight from SETUP.
     with pytest.raises(InvalidTransition):
         m.start_attempt()
     # Cannot complete before an attempt is active.
@@ -71,12 +71,37 @@ def test_new_route_from_completed_reselects():
     assert m.state is State.ROUTE_SELECT
 
 
-def test_cancel_route_select_returns_to_idle():
+def test_cancel_route_select_returns_to_setup():
     m = StateMachine()
     m.begin_route_select()
     m.cancel_route_select()
-    assert m.state is State.IDLE
+    assert m.state is State.SETUP
     assert m.route is None
+
+
+def test_session_flow_completed_to_comparison_to_setup():
+    m = StateMachine()
+    m.begin_route_select()
+    m.set_route(_fake_route())
+    m.start_attempt()
+    m.complete()
+    m.begin_comparison()
+    assert m.state is State.COMPARISON
+    m.new_session()
+    assert m.state is State.SETUP
+    assert m.route is None  # a new session drops the old route
+
+
+def test_next_climber_resets_to_ready_from_completed():
+    m = StateMachine()
+    m.begin_route_select()
+    route = _fake_route()
+    m.set_route(route)
+    m.start_attempt()
+    m.complete()
+    m.reset()  # advance to the next climber, same route
+    assert m.state is State.READY
+    assert m.route is route
 
 
 def test_attempt_elapsed_uses_clock_and_freezes_on_complete():

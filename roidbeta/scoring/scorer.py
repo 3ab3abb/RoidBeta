@@ -54,8 +54,10 @@ class Scorer:
         self._balance = BalanceTracker()
         self.history = AttemptHistory()
 
-    def update(self, pose: PoseFrame | None, width: int, height: int) -> ScoreState:
-        contact_state = self._contact.update(pose, width, height)
+    def update(
+        self, pose: PoseFrame | None, width: int, height: int, now: float = 0.0
+    ) -> ScoreState:
+        contact_state = self._contact.update(pose, width, height, now)
         balance_state = self._balance.update(pose, self._route.holds, width, height)
 
         self.history.com_trajectory.append(balance_state.com)

@@ -225,3 +225,6 @@ clips/
 
 # Saved reference trajectory (user data, not source).
 data/
+
+# macOS
+.DS_Store

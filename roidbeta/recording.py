@@ -40,7 +40,11 @@ class AttemptRecorder:
         clip_dir: str = config.CLIP_DIR,
         fourcc: str = config.CLIP_FOURCC,
         ext: str = config.CLIP_FILE_EXT,
+        measured: bool = True,
     ) -> None:
+        # measured=True times real-time frames from the wall clock (live camera);
+        # measured=False uses the given fps as-is (a video's known frame rate).
+        self._measured = measured
         self._fallback_fps = float(fps)
         self._clip_dir = Path(clip_dir)
         self._fourcc = cv2.VideoWriter_fourcc(*fourcc)
@@ -95,7 +99,9 @@ class AttemptRecorder:
 
     @property
     def fps(self) -> float:
-        """Actual frame rate of the real-time frames (falls back to the target)."""
+        """Frame rate to write at: the video's known fps, or the measured rate."""
+        if not self._measured:
+            return self._fallback_fps
         if (self._realtime_count >= 2 and self._first_t is not None
                 and self._last_t is not None and self._last_t > self._first_t):
             measured = (self._realtime_count - 1) / (self._last_t - self._first_t)

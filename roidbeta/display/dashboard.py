@@ -6,8 +6,10 @@ with the theme primitives so the whole overlay shares one professional look.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
+import cv2
 import numpy as np
 
 from .. import config
@@ -103,6 +105,66 @@ def draw_bottom_bar(frame: np.ndarray, hud: HudState) -> None:
     _draw_controls(frame, hud.controls, x + w - pad, inner_top, inner_h)
 
 
+def draw_countdown(frame: np.ndarray, seconds: float, total: float) -> None:
+    """Big centered top-out countdown with a ring showing time remaining.
+
+    Shown while both hands control the top hold; reaching zero is a send.
+    """
+    fh, fw = frame.shape[:2]
+    cx, cy = fw // 2, fh // 3
+    n = max(1, math.ceil(seconds - 1e-6))
+    frac = max(0.0, min(1.0, seconds / total)) if total else 0.0
+
+    cv2.circle(frame, (cx, cy), 78, theme.BG, -1, cv2.LINE_AA)
+    cv2.circle(frame, (cx, cy), 78, theme.BORDER, 3, cv2.LINE_AA)
+    # Arc of remaining time (starts full, shrinks clockwise from the top).
+    cv2.ellipse(frame, (cx, cy), (78, 78), -90, 0, int(360 * frac),
+                theme.SUCCESS, 5, cv2.LINE_AA)
+    _center_text(frame, str(n), cx, cy + 34, 3.2, theme.TEXT, 5)
+    _center_text(frame, "HOLD THE TOP", cx, cy + 118, 0.7, theme.SUCCESS, 2)
+
+
+def draw_setup_screen(frame: np.ndarray, mode: str, count: int) -> None:
+    """Mode-select screen: SOLO vs SESSION (with a climber count)."""
+    fh, fw = frame.shape[:2]
+    w1, _ = theme.text_size("ROID", 2.2, 3)
+    w2, _ = theme.text_size("BETA", 2.2, 3)
+    sx = (fw - (w1 + w2 + 12)) // 2
+    theme.text(frame, "ROID", (sx, 130), 2.2, theme.TEXT, 3)
+    theme.text(frame, "BETA", (sx + w1 + 12, 130), 2.2, theme.PRIMARY, 3)
+    _center_text(frame, "real-time bouldering scorer", fw // 2, 170,
+                 0.6, theme.TEXT_MUTED, 1)
+
+    card_w, card_h, gap = 260, 150, 40
+    total_w = card_w * 2 + gap
+    x0 = (fw - total_w) // 2
+    y0 = fh // 2 - card_h // 2
+    _mode_card(frame, x0, y0, card_w, card_h, "SOLO", "just me",
+               mode == "solo", theme.PRIMARY)
+    _mode_card(frame, x0 + card_w + gap, y0, card_w, card_h, "SESSION",
+               f"{count} climbers, compared", mode == "session", theme.SUCCESS)
+
+    if mode == "session":
+        _center_text(frame, f"CLIMBERS: {count}", fw // 2, y0 + card_h + 46,
+                     0.8, theme.TEXT, 2)
+        _center_text(frame, "+ / - to change", fw // 2, y0 + card_h + 72,
+                     0.5, theme.TEXT_MUTED, 1)
+
+    _center_text(frame, "S solo    M session    ENTER start    Q quit",
+                 fw // 2, fh - 40, 0.6, theme.TEXT_MUTED, 1)
+
+
+def _mode_card(frame, x, y, w, h, title, subtitle, selected, accent) -> None:
+    theme.panel(frame, x, y, w, h, radius=16, color=theme.BG,
+                alpha=0.9, border=accent if selected else theme.BORDER)
+    if selected:
+        theme.panel(frame, x, y, w, 6, radius=3, color=accent, alpha=0.95, border=None)
+    color = theme.TEXT if selected else theme.TEXT_MUTED
+    _center_text(frame, title, x + w // 2, y + h // 2, 1.1, color, 2)
+    _center_text(frame, subtitle, x + w // 2, y + h // 2 + 34, 0.5,
+                 theme.TEXT_MUTED, 1)
+
+
 def draw_top_banner(frame: np.ndarray, title: str, subtitle: str,
                     accent=theme.VIOLET) -> None:
     """A centered banner at the top, for full-screen modes like clip review.
@@ -121,6 +183,18 @@ def draw_top_banner(frame: np.ndarray, title: str, subtitle: str,
     theme.panel(frame, x, y, w, 5, radius=3, color=accent, alpha=0.95, border=None)
     _center_text(frame, title, x + w // 2, y + 34, 0.7, accent, 2)
     _center_text(frame, subtitle, x + w // 2, y + 62, 0.55, theme.TEXT_MUTED, 1)
+
+
+def draw_climber_tag(frame: np.ndarray, label: str, color) -> None:
+    """A centered pill at the top naming the climber currently up (session mode)."""
+    fw = frame.shape[1]
+    tw, th = theme.text_size(label, 0.6, 1)
+    pad = 16
+    w, h = tw + 2 * pad + 22, th + 18
+    x, y = (fw - w) // 2, 14
+    theme.panel(frame, x, y, w, h, radius=h // 2, color=theme.BG, alpha=0.85)
+    cv2.circle(frame, (x + pad + 4, y + h // 2), 7, color, -1, cv2.LINE_AA)
+    theme.text(frame, label, (x + pad + 20, y + h - 10), 0.6, theme.TEXT, 1)
 
 
 def draw_hint(frame: np.ndarray, controls: list[str]) -> None:

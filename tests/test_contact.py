@@ -31,7 +31,7 @@ def _pose(points):
 
 
 def _tracker():
-    return ContactTracker(ROUTE, contact_frames=3, completion_frames=3)
+    return ContactTracker(ROUTE, contact_frames=3, completion_seconds=0.5)
 
 
 def test_hold_used_after_n_consecutive_frames():
@@ -74,28 +74,45 @@ def test_low_visibility_keypoints_are_ignored():
     assert not s.touched_indices
 
 
-def test_two_hands_on_top_hold_completes():
-    t = _tracker()
-    both_hands_on_top = _pose({
+def test_two_hands_held_for_the_countdown_completes():
+    t = _tracker()  # completion_seconds=0.5
+    both = _pose({
         Landmark.LEFT_WRIST: (TOP.x - 3, TOP.y),
         Landmark.RIGHT_WRIST: (TOP.x + 3, TOP.y),
     })
-
-    for _ in range(3):
-        s = t.update(both_hands_on_top, WIDTH, HEIGHT)
+    s = t.update(both, WIDTH, HEIGHT, now=0.0)   # countdown starts
+    assert s.top_countdown is not None and 0.4 < s.top_countdown <= 0.5
+    assert not s.completed
+    t.update(both, WIDTH, HEIGHT, now=0.2)       # keep holding (also builds the
+    t.update(both, WIDTH, HEIGHT, now=0.4)       # contact streak so the hold is used)
+    s = t.update(both, WIDTH, HEIGHT, now=0.5)   # held the full 0.5s
     assert s.completed
-    assert t.completed
     assert s.highest_rank == 3  # topped out
+
+
+def test_countdown_resets_when_a_hand_comes_off():
+    t = _tracker()
+    both = _pose({Landmark.LEFT_WRIST: (TOP.x, TOP.y),
+                  Landmark.RIGHT_WRIST: (TOP.x, TOP.y)})
+    one = _pose({Landmark.LEFT_WRIST: (TOP.x, TOP.y)})  # right hand off
+
+    t.update(both, WIDTH, HEIGHT, now=0.0)
+    s = t.update(one, WIDTH, HEIGHT, now=0.3)      # a hand left before 0.5s
+    assert s.top_countdown is None and not s.completed
+    s = t.update(both, WIDTH, HEIGHT, now=0.4)     # countdown restarts here
+    assert s.top_countdown is not None and s.top_countdown > 0.4
+    assert not s.completed                          # only 0s elapsed since restart
 
 
 def test_one_hand_on_top_hold_does_not_complete():
     t = _tracker()
     one_hand_on_top = _pose({Landmark.LEFT_WRIST: (TOP.x, TOP.y)})
 
-    for _ in range(6):
-        s = t.update(one_hand_on_top, WIDTH, HEIGHT)
+    for i in range(6):
+        s = t.update(one_hand_on_top, WIDTH, HEIGHT, now=float(i))
 
     assert not s.completed        # a send needs two hands controlling the top
+    assert s.top_countdown is None
     assert 0 in s.used_indices    # but one hand still marks the hold used
 
 
@@ -106,8 +123,8 @@ def test_feet_on_top_hold_do_not_complete():
         Landmark.RIGHT_FOOT_INDEX: (TOP.x + 3, TOP.y),
     })
 
-    for _ in range(5):
-        s = t.update(foot_on_top, WIDTH, HEIGHT)
+    for i in range(5):
+        s = t.update(foot_on_top, WIDTH, HEIGHT, now=float(i))
 
     assert not s.completed          # feet never count as a send
     assert 0 in s.used_indices      # but the feet still mark the hold used
@@ -124,16 +141,15 @@ def test_no_pose_breaks_streak_but_keeps_used():
     assert not s.touched_indices       # nothing touched this frame
 
 
-def test_sequential_hands_complete_the_top():
-    # A realistic top: one hand matches, then the other arrives later. It should
-    # still complete even though both hands are never on the hold at once.
-    t = _tracker()  # completion_frames=3
+def test_sequential_hands_do_not_complete():
+    # A controlled top needs both hands on at once. One hand then the other,
+    # never together, must not count (they never overlap on the hold).
+    t = _tracker()
     left = _pose({Landmark.LEFT_WRIST: (TOP.x, TOP.y)})
     right = _pose({Landmark.RIGHT_WRIST: (TOP.x, TOP.y)})
 
-    for _ in range(4):
-        s = t.update(left, WIDTH, HEIGHT)   # left hand matches first
-    assert not s.completed                  # one hand only, not a send yet
-    for _ in range(4):
-        s = t.update(right, WIDTH, HEIGHT)  # right hand matches later
-    assert s.completed                      # both have now matched -> send
+    for i in range(5):
+        s = t.update(left, WIDTH, HEIGHT, now=float(i))
+    for i in range(5, 10):
+        s = t.update(right, WIDTH, HEIGHT, now=float(i))
+    assert not s.completed

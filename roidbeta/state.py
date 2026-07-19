@@ -23,22 +23,26 @@ from .route.holds import RouteMask
 
 
 class State(Enum):
-    IDLE = auto()
+    SETUP = auto()          # choose solo vs session and the climber count
     ROUTE_SELECT = auto()
     READY = auto()
     ATTEMPT_ACTIVE = auto()
     COMPLETED = auto()
-    REVIEW = auto()  # replaying the recorded attempt to keep or discard it
+    REVIEW = auto()         # replaying the recorded attempt to keep or discard it
+    COMPARISON = auto()     # session results: skill graph + leaderboards
 
 
 # Allowed transitions. Anything not listed here is rejected.
 _ALLOWED: dict[State, frozenset[State]] = {
-    State.IDLE: frozenset({State.ROUTE_SELECT}),
-    State.ROUTE_SELECT: frozenset({State.READY, State.IDLE}),  # IDLE = cancel
-    State.READY: frozenset({State.ATTEMPT_ACTIVE, State.ROUTE_SELECT}),
+    State.SETUP: frozenset({State.ROUTE_SELECT}),
+    State.ROUTE_SELECT: frozenset({State.READY, State.SETUP}),  # SETUP = cancel
+    State.READY: frozenset({State.ATTEMPT_ACTIVE, State.ROUTE_SELECT, State.SETUP}),
     State.ATTEMPT_ACTIVE: frozenset({State.COMPLETED, State.READY}),  # READY = abort
-    State.COMPLETED: frozenset({State.READY, State.ROUTE_SELECT, State.REVIEW}),
+    State.COMPLETED: frozenset(
+        {State.READY, State.ROUTE_SELECT, State.REVIEW, State.COMPARISON}
+    ),
     State.REVIEW: frozenset({State.COMPLETED}),
+    State.COMPARISON: frozenset({State.SETUP}),  # SETUP = new session
 }
 
 
@@ -54,7 +58,7 @@ class StateMachine:
 
     def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
         self._clock = clock
-        self._state = State.IDLE
+        self._state = State.SETUP
         self._route: RouteMask | None = None
         self._attempt_start: float | None = None
         self._attempt_end: float | None = None
@@ -78,12 +82,12 @@ class StateMachine:
     # --- transitions ---
 
     def begin_route_select(self) -> None:
-        """Enter ROUTE_SELECT from IDLE, READY, or COMPLETED to pick a route."""
+        """Enter ROUTE_SELECT from SETUP, READY, or COMPLETED to pick a route."""
         self._transition(State.ROUTE_SELECT)
 
     def cancel_route_select(self) -> None:
-        """Back out of ROUTE_SELECT to IDLE without choosing a route."""
-        self._transition(State.IDLE)
+        """Back out of ROUTE_SELECT to SETUP without choosing a route."""
+        self._transition(State.SETUP)
 
     def set_route(self, route: RouteMask) -> None:
         """Freeze the selected route and advance ROUTE_SELECT -> READY."""
@@ -110,8 +114,19 @@ class StateMachine:
         self._transition(State.COMPLETED)
 
     def reset(self) -> None:
-        """Return to READY keeping the same route (abort or retry)."""
+        """Return to READY keeping the same route (abort, retry, or next climber)."""
         self._transition(State.READY)
+        self._attempt_start = None
+        self._attempt_end = None
+
+    def begin_comparison(self) -> None:
+        """Session finished: COMPLETED -> COMPARISON to show the results."""
+        self._transition(State.COMPARISON)
+
+    def new_session(self) -> None:
+        """Leave COMPARISON back to SETUP to start a fresh session."""
+        self._transition(State.SETUP)
+        self._route = None
         self._attempt_start = None
         self._attempt_end = None
 

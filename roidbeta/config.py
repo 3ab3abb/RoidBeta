@@ -45,8 +45,8 @@ HOLD_UNSELECT_TOLERANCE_PX = 30      # click-to-hold distance that counts as "re
 # --- Hold contact (Layer A) ---
 KEYPOINT_MIN_VISIBILITY = 0.5        # ignore keypoints below this confidence (likely occluded)
 HOLD_CONTACT_FRAMES_N = 8            # frames a hand/foot keypoint must stay in a hold radius
-TOP_HOLD_COMPLETION_FRAMES_N = 12    # frames the top hold must be matched (controlled) to complete
-TOP_HOLD_HANDS_REQUIRED = 2          # hands that must be on the top hold to count a send (match)
+TOP_HOLD_COMPLETION_SECONDS = 3.0    # seconds both hands must stay on the top hold (controlled top)
+TOP_HOLD_HANDS_REQUIRED = 2          # hands that must be on the top hold at once to count a send
 # Completion is judged with a slightly enlarged top-hold radius, since hands
 # rarely land dead-center and keypoints jitter; this makes topping out reliable.
 TOP_HOLD_COMPLETION_RADIUS_SCALE = 1.6
@@ -61,6 +61,15 @@ BALANCE_GAP_COM_STABLE_PX = 45       # only carry it while the CoM stays within 
 COM_SWAY_WINDOW_FRAMES = 30
 REGRIP_COOLDOWN_FRAMES = 5           # min frames between counting a new regrip on the same hold
 TRAJECTORY_SMOOTHNESS_WINDOW_FRAMES = 10
+
+# --- Skill profile (per-climber summary axes for the comparison radar) ---
+# Smoothness: acceleration relative to speed along the CoG path (roughness). The
+# scale maps roughness to a 0..1 smoothness score; higher scale = more forgiving.
+SMOOTHNESS_SCALE = 0.18
+# Speed axis: holds-reached-per-second that maps to a full (1.0) speed score.
+SPEED_FULL_SCALE_HPS = 0.4
+# Order and labels of the skill-graph axes.
+SKILL_AXES = ("Balance", "Smoothness", "Speed", "Reach")
 
 # --- Display ---
 OVERLAY_WINDOW_NAME = "RoidBeta"
