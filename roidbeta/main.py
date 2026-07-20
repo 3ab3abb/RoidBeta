@@ -175,8 +175,8 @@ def _review_clip(recorder: AttemptRecorder | None) -> str:
         cap.release()
 
 
-def run(source: FrameSource) -> None:
-    with source, PoseEstimator() as pose_estimator:
+def run(source: FrameSource, pose_variant: str = config.POSE_MODEL_VARIANT) -> None:
+    with source, PoseEstimator(variant=pose_variant) as pose_estimator:
         if _wait_for_first_frame(source) is None:
             print("No frames from the source. Is the camera connected / video valid?")
             return
@@ -411,7 +411,7 @@ def run(source: FrameSource) -> None:
 def _build_source(args: argparse.Namespace) -> FrameSource:
     if args.video:
         return VideoFileSource(args.video, loop=args.loop, fps=args.fps or None)
-    return ContinuityCameraSource()
+    return ContinuityCameraSource(camera_index=args.camera)
 
 
 def _parse_args(argv=None) -> argparse.Namespace:
@@ -421,11 +421,18 @@ def _parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--loop", action="store_true", help="loop the video file")
     parser.add_argument("--fps", type=float, default=0.0,
                         help="override video fps (0 = the file's own fps)")
+    parser.add_argument("--camera", type=int, default=config.CAMERA_INDEX,
+                        metavar="N",
+                        help="camera index to open (try 1 if it grabs the wrong one)")
+    parser.add_argument("--pose", default=config.POSE_MODEL_VARIANT,
+                        choices=("lite", "full", "heavy"),
+                        help="pose model: lite is fastest, heavy most accurate")
     return parser.parse_args(argv)
 
 
 def main(argv=None) -> None:
-    run(_build_source(_parse_args(argv)))
+    args = _parse_args(argv)
+    run(_build_source(args), pose_variant=args.pose)
 
 
 if __name__ == "__main__":

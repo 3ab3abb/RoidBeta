@@ -54,6 +54,13 @@ Live camera:
 .venv/bin/python -m roidbeta.main
 ```
 
+If it opens the wrong camera (the Mac webcam instead of the iPhone), pass another
+index; if pose runs too slowly on your machine, use the lite model:
+
+```bash
+.venv/bin/python -m roidbeta.main --camera 1 --pose lite
+```
+
 On a recorded video (for testing the pipeline without the wall):
 
 ```bash
